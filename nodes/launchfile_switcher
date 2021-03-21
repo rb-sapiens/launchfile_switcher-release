@@ -1,0 +1,121 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+#################################################################################
+# MIT License
+
+# Copyright (c) 2021 Shun Nagao
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#################################################################################
+
+import rospy
+import roslaunch
+import rosnode
+import rospkg
+
+from std_msgs.msg import String
+import re
+from copy import copy
+
+mode_list = rospy.get_param('/launchfile_switcher/mode_list')
+keeping_node_default_patterns = [re.compile("\/?rosout"), re.compile("\/?rviz.*"), re.compile("\/?robomaker\/srv"),re.compile("\/?gazebo")]
+
+rospack = rospkg.RosPack()
+
+# global variables
+
+current_mode = ''
+next_mode = rospy.get_param('initial_mode', '')
+
+
+def callback(msg):
+    '''
+    Callback function of /mode topic subscription
+
+    msg.data : std_msgs/String
+    '''
+    global next_mode
+    global current_mode
+
+    if not msg.data in mode_list.keys():
+        return
+    if current_mode == msg.data:
+        return
+    next_mode = msg.data
+    rospy.loginfo('next_mode: %s', next_mode)
+
+
+if __name__ == '__main__':
+    rospy.init_node('launchfile_switcher', log_level=rospy.DEBUG)
+
+    rospy.Subscriber('mode', String, callback)
+
+    while not rospy.is_shutdown():
+        rate = rospy.Rate(10)
+        if current_mode != next_mode:
+            rospy.loginfo('current_mode:%s next_mode:%s', current_mode, next_mode)
+            current_mode = next_mode
+
+            config = mode_list[current_mode]
+            launch_configs = config['launch']
+
+            # Killing current rosnodes
+            node_names = rosnode.get_node_names()
+            node_names_to_kill = []
+
+            # Merging keeping_node_patterns from yaml config
+            keeping_node_patterns = copy(keeping_node_default_patterns)
+            if 'keeping_node_patterns' in config:
+                for pattern in config['keeping_node_patterns']:
+                    r = re.compile(pattern)
+                    keeping_node_patterns.append(re.compile(pattern))
+            keeping_node_patterns.append(re.compile(rospy.get_name()))
+
+            for node_name in node_names:
+                is_killed = True
+                for pattern in keeping_node_patterns:
+                    if pattern.search(node_name) is not None:
+                        is_killed = False
+                if is_killed == True:
+                    node_names_to_kill.append(node_name)
+            rospy.loginfo('killing nodes...')
+            rospy.loginfo(node_names_to_kill)
+            rosnode.kill_nodes(node_names_to_kill)
+
+            # Launch new launchfiles according to the next mode
+            for launch_config in launch_configs:
+                launchfile_path = rospack.get_path(launch_config['pkg'
+                        ]) + launch_config['file']
+                uuid = roslaunch.rlutil.get_or_generate_uuid(None,
+                        False)
+                roslaunch.configure_logging(uuid)
+
+                args_list = launch_config['args']
+                args = []
+                for arg in args_list:
+                    arg_string = '{0}:={1}'.format(arg['name'],
+                            arg['value'])
+                    args.append(arg_string)
+
+                launch = roslaunch.parent.ROSLaunchParent(uuid,
+                        [(launchfile_path, args)])
+                launch.start()
+
+        rate.sleep()
